@@ -1,120 +1,122 @@
 #!/bin/bash
 
-# 定义帮助信息函数
+# 功能：批量提取 MKV/MP4 中的 ASS 字幕索引，自动转换为 SRT
+# 修复点：1. 修正 ffmpeg 命令语法（换行符/引号）；2. 处理特殊文件名；3. 完善成功判断逻辑
+
 usage() {
     echo "Usage: $0 [-h|--help] <文件名1.mkv/.mp4> [文件名2.mkv/.mp4 ...]"
     echo
-    echo "检查指定的 .mkv 或 .mp4 文件中是否存在字幕轨道，如果存在则提取为 .srt 格式文件。"
-    echo "提取的字幕文件命名格式：<原始文件名>_<语言>_sub<轨道号>.srt"
-    echo "（如果无法识别语言，则使用 'unknown' 作为语言标识）"
+    echo "自动提取 ASS 字幕流索引，转换为 SRT 格式"
+    echo "输出格式：<原始文件名>.srt"
     echo
     echo "Options:"
     echo "  -h, --help    显示此帮助信息并退出"
-    echo
-    echo "Examples:"
-    echo "  $0 \"my-video.mkv\""
-    echo "  $0 \"video1.mp4\" \"video2.mkv\""
 }
 
-# 检查 ffmpeg 是否安装
+# 检查依赖（ffprobe、jq、ffmpeg）
 check_dependencies() {
+    if ! command -v ffprobe &> /dev/null; then
+        echo "❌ 错误：未检测到 ffprobe！请安装 FFmpeg（brew install ffmpeg）"
+        exit 1
+    fi
+    if ! command -v jq &> /dev/null; then
+        echo "❌ 错误：未检测到 jq！请安装（brew install jq）"
+        exit 1
+    fi
     if ! command -v ffmpeg &> /dev/null; then
-        echo "错误：需要安装 ffmpeg 才能运行此脚本。"
-        echo "安装方法："
-        echo "  - Ubuntu/Debian: sudo apt update && sudo apt install ffmpeg"
-        echo "  - macOS (Homebrew): brew install ffmpeg"
-        echo "  - Windows: 从 https://ffmpeg.org/download.html 下载并添加到环境变量"
+        echo "❌ 错误：未检测到 ffmpeg！请安装（brew install ffmpeg）"
         exit 1
     fi
 }
 
-# 提取单个视频文件的字幕（支持 .mkv 和 .mp4）
-extract_subtitles() {
+# 提取单个文件的 ASS 索引并转换（核心修复部分）
+extract_ass_and_convert() {
     local file="$1"
-    # 去掉文件后缀（.mkv 或 .mp4）作为基础文件名
     local base_name="${file%.*}"
-    local has_subtitles=false
+    # 输出文件用双引号包裹，处理特殊字符（如空格、@、￡等）
+    local output_file="${base_name}.srt"
 
-    echo "=================================================="
+    echo -e "\n=================================================="
     echo "正在处理文件：$file"
+    echo "输出 SRT 文件：$output_file"
     echo "=================================================="
 
-    # 获取所有字幕轨道信息
-    local subtitle_info=$(ffmpeg -i "$file" 2>&1 | grep -E 'Stream #0:[0-9]+.*Subtitle')
+    # 1. 提取 ASS 字幕索引（JSON 筛选，确保索引有效）
+    local ass_index=$(ffprobe -v quiet -print_format json -show_streams "$file" | \
+                      jq -r '.streams[] | select(.codec_name == "ass") | .index')
 
-    # 检查是否有字幕轨道
-    if [ -z "$subtitle_info" ]; then
-        echo "文件中未检测到字幕轨道。"
-        return
+    if [ -z "$ass_index" ] || [ "$ass_index" = "null" ]; then
+        echo "⚠️  未检测到 ASS 字幕流，跳过此文件"
+        return 1  # 标记为失败
     fi
 
-    # 遍历所有字幕轨道
-    echo "$subtitle_info" | while read -r line; do
-        has_subtitles=true
-        
-        # 提取轨道索引（例如从 "Stream #0:3" 中提取 "3"）
-        local track_index=$(echo "$line" | awk '{print $2}' | cut -d: -f2)
-        
-        # 提取语言（例如从 "(eng)" 中提取 "eng"）
-        local lang=$(echo "$line" | grep -oP '\(\K[^)]+' | head -n1)
-        [ -z "$lang" ] && lang="unknown"  # 如果没有语言信息，使用 unknown
-        
-        # 构建输出文件名
-        local output_file="${base_name}_${lang}_sub${track_index}.srt"
-        
-        echo
-        echo "发现字幕轨道 $track_index（语言：$lang），正在提取..."
-        echo "输出文件：$output_file"
-        
-        # 提取字幕（使用 -c:s srt 确保转换为 SRT 格式）
-        ffmpeg -i "$file" -map 0:s:"$track_index" -c:s srt -y "$output_file"
-        
-        # 检查提取结果
-        if [ $? -eq 0 ]; then
-            echo "字幕提取成功：$output_file"
-        else
-            echo "警告：字幕轨道 $track_index 提取失败！"
-        fi
-    done
+    echo "✅ 找到 ASS 字幕流，索引：$ass_index"
+    echo "正在转换为 SRT..."
 
-    if [ "$has_subtitles" = true ]; then
-        echo
-        echo "文件 $file 的所有字幕轨道处理完成。"
+    # 2. 修复 ffmpeg 命令语法：
+    #    - 反斜杠后面无空格，直接换行（避免截断）
+    #    - 所有路径用双引号包裹（处理特殊字符）
+    #    - 保留关键日志（去掉 2>/dev/null，方便排查）
+    ffmpeg -i "$file" \
+           -map "0:$ass_index" \
+           -c:s srt \
+           -y \
+           "$output_file"
+
+    # 3. 完善成功判断逻辑（必须满足 3 个条件）
+    if [ $? -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
+        echo "✅ 转换成功：$output_file"
+        return 0  # 标记为成功
+    else
+        echo "❌ 转换失败！"
+        [ -f "$output_file" ] && rm -f "$output_file"  # 清理无效文件
+        return 1  # 标记为失败
     fi
 }
 
 # 主程序入口
 main() {
-    # 检查依赖
     check_dependencies
 
-    # 处理帮助选项
     if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
         usage
         exit 0
     fi
 
-    # 遍历所有输入文件
+    local total_files=$#
+    local success_count=0
+    local fail_count=0
+
+    echo "📋 开始处理 $total_files 个文件..."
+
     for file in "$@"; do
-        # 检查文件是否存在
         if [ ! -f "$file" ]; then
-            echo "警告：文件 '$file' 不存在，跳过。"
+            echo -e "\n⚠️  文件 '$file' 不存在，跳过"
+            ((fail_count++))
             continue
         fi
 
-        # 支持 .mkv 和 .mp4 格式
         if [[ "$file" != *.mkv && "$file" != *.mp4 ]]; then
-            echo "警告：文件 '$file' 不是 .mkv 或 .mp4 文件，跳过。"
+            echo -e "\n⚠️  文件 '$file' 不是 MKV/MP4 格式，跳过"
+            ((fail_count++))
             continue
         fi
 
-        # 提取字幕
-        extract_subtitles "$file"
-        echo
+        # 根据函数返回值计数
+        if extract_ass_and_convert "$file"; then
+            ((success_count++))
+        else
+            ((fail_count++))
+        fi
     done
 
-    echo "所有文件处理完成！"
+    # 输出正确的总结
+    echo -e "\n=================================================="
+    echo "📊 处理总结："
+    echo "总文件数：$total_files"
+    echo "成功转换：$success_count"
+    echo "跳过/失败：$fail_count"
+    echo "=================================================="
 }
 
-# 启动主程序
 main "$@"
