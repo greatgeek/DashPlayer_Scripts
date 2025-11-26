@@ -2,9 +2,9 @@
 
 # 定义帮助信息函数
 usage() {
-    echo "Usage: $0 [-h|--help] <文件名1.mkv> [文件名2.mkv ...]"
+    echo "Usage: $0 [-h|--help] <文件名1.mkv/.mp4> [文件名2.mkv/.mp4 ...]"
     echo
-    echo "检查指定的 .mkv 文件中是否存在字幕轨道，如果存在则提取为 .srt 格式文件。"
+    echo "检查指定的 .mkv 或 .mp4 文件中是否存在字幕轨道，如果存在则提取为 .srt 格式文件。"
     echo "提取的字幕文件命名格式：<原始文件名>_<语言>_sub<轨道号>.srt"
     echo "（如果无法识别语言，则使用 'unknown' 作为语言标识）"
     echo
@@ -13,7 +13,7 @@ usage() {
     echo
     echo "Examples:"
     echo "  $0 \"my-video.mkv\""
-    echo "  $0 \"video1.mkv\" \"video2.mkv\""
+    echo "  $0 \"video1.mp4\" \"video2.mkv\""
 }
 
 # 检查 ffmpeg 是否安装
@@ -28,10 +28,11 @@ check_dependencies() {
     fi
 }
 
-# 提取单个 MKV 文件的字幕
+# 提取单个视频文件的字幕（支持 .mkv 和 .mp4）
 extract_subtitles() {
     local file="$1"
-    local base_name="${file%.mkv}"
+    # 去掉文件后缀（.mkv 或 .mp4）作为基础文件名
+    local base_name="${file%.*}"
     local has_subtitles=false
 
     echo "=================================================="
@@ -101,9 +102,9 @@ main() {
             continue
         fi
 
-        # 检查文件是否为 .mkv 格式
-        if [[ "$file" != *.mkv ]]; then
-            echo "警告：文件 '$file' 不是 .mkv 格式，跳过。"
+        # 支持 .mkv 和 .mp4 格式
+        if [[ "$file" != *.mkv && "$file" != *.mp4 ]]; then
+            echo "警告：文件 '$file' 不是 .mkv 或 .mp4 文件，跳过。"
             continue
         fi
 
