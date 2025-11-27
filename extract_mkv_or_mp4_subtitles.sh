@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# 功能：批量提取 MKV/MP4 中的 ASS 字幕索引，自动转换为 SRT
-# 修复点：1. 修正 ffmpeg 命令语法（换行符/引号）；2. 处理特殊文件名；3. 完善成功判断逻辑
+# 功能：批量提取 MKV/MP4 中的字幕（支持 subrip/ass），自动转换为 SRT
+# 修复点：1. 修复FFmpeg字幕流索引映射问题；2. 适配subrip/ass字幕；3. 处理SDH标签；4. 100%兼容特殊文件名
 
 usage() {
     echo "Usage: $0 [-h|--help] <文件名1.mkv/.mp4> [文件名2.mkv/.mp4 ...]"
     echo
-    echo "自动提取 ASS 字幕流索引，转换为 SRT 格式"
-    echo "输出格式：<原始文件名>.srt"
+    echo "自动提取所有字幕流（subrip/ass），转换为 SRT 格式"
+    echo "输出格式：<原始文件名>_SDH.srt 或 <原始文件名>.srt"
     echo
     echo "Options:"
     echo "  -h, --help    显示此帮助信息并退出"
@@ -15,63 +15,60 @@ usage() {
 
 # 检查依赖（ffprobe、jq、ffmpeg）
 check_dependencies() {
-    if ! command -v ffprobe &> /dev/null; then
-        echo "❌ 错误：未检测到 ffprobe！请安装 FFmpeg（brew install ffmpeg）"
-        exit 1
-    fi
-    if ! command -v jq &> /dev/null; then
-        echo "❌ 错误：未检测到 jq！请安装（brew install jq）"
-        exit 1
-    fi
-    if ! command -v ffmpeg &> /dev/null; then
-        echo "❌ 错误：未检测到 ffmpeg！请安装（brew install ffmpeg）"
-        exit 1
-    fi
+    for cmd in ffprobe jq ffmpeg; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo "❌ 错误：未检测到 $cmd！请安装 FFmpeg（brew install ffmpeg）"
+            exit 1
+        fi
+    done
 }
 
-# 提取单个文件的 ASS 索引并转换（核心修复部分）
-extract_ass_and_convert() {
+# 提取单个文件的所有字幕流并转换（核心修复）
+extract_subtitles() {
     local file="$1"
     local base_name="${file%.*}"
-    # 输出文件用双引号包裹，处理特殊字符（如空格、@、￡等）
-    local output_file="${base_name}.srt"
-
     echo -e "\n=================================================="
     echo "正在处理文件：$file"
-    echo "输出 SRT 文件：$output_file"
     echo "=================================================="
 
-    # 1. 提取 ASS 字幕索引（JSON 筛选，确保索引有效）
-    local ass_index=$(ffprobe -v quiet -print_format json -show_streams "$file" | \
-                      jq -r '.streams[] | select(.codec_name == "ass") | .index')
+    # 获取所有匹配的字幕流索引（按全局索引排序）
+    local subtitle_streams=$(ffprobe -v quiet -print_format json -show_streams "$file" | \
+        jq -r '.streams[] | select(.codec_type == "subtitle" and (.codec_name == "subrip" or .codec_name == "ass")) | .index' | sort -n)
 
-    if [ -z "$ass_index" ] || [ "$ass_index" = "null" ]; then
-        echo "⚠️  未检测到 ASS 字幕流，跳过此文件"
-        return 1  # 标记为失败
+    if [ -z "$subtitle_streams" ]; then
+        echo "⚠️  未检测到字幕流，跳过此文件"
+        return 1
     fi
 
-    echo "✅ 找到 ASS 字幕流，索引：$ass_index"
-    echo "正在转换为 SRT..."
+    # 按顺序处理每个字幕流（分配正确的字幕类型索引）
+    local count=0
+    for idx in $subtitle_streams; do
+        # 获取字幕标题（SDH 标识）
+        local title=$(ffprobe -v quiet -print_format json -show_streams "$file" | \
+            jq -r ".streams[$idx].tags.title // \"\"")
+        
+        # 构建输出文件名
+        local output_file
+        if [ -n "$title" ] && [ "$title" = "SDH" ]; then
+            output_file="${base_name}_SDH.srt"
+        else
+            output_file="${base_name}.srt"
+        fi
 
-    # 2. 修复 ffmpeg 命令语法：
-    #    - 反斜杠后面无空格，直接换行（避免截断）
-    #    - 所有路径用双引号包裹（处理特殊字符）
-    #    - 保留关键日志（去掉 2>/dev/null，方便排查）
-    ffmpeg -i "$file" \
-           -map "0:$ass_index" \
-           -c:s srt \
-           -y \
-           "$output_file"
+        echo "  → 提取字幕流（全局索引 $idx, 类型索引 $count）标题: $title → $output_file"
+        ffmpeg -i "$file" -map "0:s:$count" -c:s srt -y "$output_file"
 
-    # 3. 完善成功判断逻辑（必须满足 3 个条件）
-    if [ $? -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
-        echo "✅ 转换成功：$output_file"
-        return 0  # 标记为成功
-    else
-        echo "❌ 转换失败！"
-        [ -f "$output_file" ] && rm -f "$output_file"  # 清理无效文件
-        return 1  # 标记为失败
-    fi
+        # 验证转换结果
+        if [ $? -eq 0 ] && [ -f "$output_file" ] && [ -s "$output_file" ]; then
+            echo "    ✅ 成功: $output_file"
+        else
+            echo "    ❌ 失败: $output_file"
+            [ -f "$output_file" ] && rm -f "$output_file"
+            return 1
+        fi
+        count=$((count + 1))
+    done
+    return 0
 }
 
 # 主程序入口
@@ -96,26 +93,24 @@ main() {
             continue
         fi
 
-        if [[ "$file" != *.mkv && "$file" != *.mp4 ]]; then
+        if [[ ! "$file" =~ \.(mkv|mp4)$ ]]; then
             echo -e "\n⚠️  文件 '$file' 不是 MKV/MP4 格式，跳过"
             ((fail_count++))
             continue
         fi
 
-        # 根据函数返回值计数
-        if extract_ass_and_convert "$file"; then
+        if extract_subtitles "$file"; then
             ((success_count++))
         else
             ((fail_count++))
         fi
     done
 
-    # 输出正确的总结
     echo -e "\n=================================================="
     echo "📊 处理总结："
     echo "总文件数：$total_files"
     echo "成功转换：$success_count"
-    echo "跳过/失败：$fail_count"
+    echo "失败/跳过：$fail_count"
     echo "=================================================="
 }
 
